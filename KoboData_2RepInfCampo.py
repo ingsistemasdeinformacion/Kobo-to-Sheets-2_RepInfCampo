@@ -20,7 +20,7 @@ BASE_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions
 HEADERS = {}  # {"Authorization": "Token TU_TOKEN_AQUI"}
 
 # ID de tu Google Sheet
-SHEET_ID = "TU_GOOGLE_SHEET_ID"
+SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"
 
 def sanitize_sheet_name(name: str) -> str:
     cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
