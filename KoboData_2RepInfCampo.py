@@ -17,18 +17,26 @@ from google.oauth2.service_account import Credentials
 
 # === Configuración ===
 BASE_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions/?format=json"
-HEADERS = {}  # {"Authorization": "Token TU_TOKEN_AQUI"}
 
-# ID de tu Google Sheet
+# Token si la encuesta es privada:
+# HEADERS = {"Authorization": "Token TU_TOKEN_AQUI"}
+HEADERS = {}
+
+# ID de Google Sheet (extraído de la URL del archivo en Drive)
 SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"
 
+# === Funciones auxiliares ===
 def sanitize_sheet_name(name: str) -> str:
+    """Limpia el nombre de hoja para que sea válido en Excel/Sheets."""
     cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
     return cleaned[:31]
 
+
 def get_all_submissions(url, headers=None):
+    """Descarga todos los datos desde Kobo (maneja lista o dict con results)."""
     all_results = []
     next_url = url
+
     while next_url:
         print(f"📥 Descargando: {next_url}")
         resp = requests.get(next_url, headers=headers)
@@ -45,10 +53,19 @@ def get_all_submissions(url, headers=None):
         else:
             print("⚠ Respuesta inesperada de la API")
             next_url = None
+
     return all_results
 
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Reemplaza valores no válidos (NaN, inf, -inf) para Google Sheets."""
+    df = df.replace([float("inf"), float("-inf")], pd.NA)
+    df = df.fillna("")
+    return df
+
+
 def upload_to_google_sheets(results):
-    # Autenticación con Google
+    """Sube los datos a Google Sheets, sobrescribiendo todas las hojas."""
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
     creds = Credentials.from_service_account_info(
         creds_dict,
@@ -58,10 +75,10 @@ def upload_to_google_sheets(results):
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SHEET_ID)
 
-    # === Datos principales aplanados ===
+    # === Datos principales ===
     df_main = pd.json_normalize(results, sep=".")
+    df_main = clean_dataframe(df_main)
 
-    # Sobrescribir hoja principal
     try:
         worksheet = sh.worksheet("Datos_principales")
         sh.del_worksheet(worksheet)
@@ -70,7 +87,7 @@ def upload_to_google_sheets(results):
     worksheet = sh.add_worksheet(title="Datos_principales", rows="1000", cols="20")
     worksheet.update([df_main.columns.values.tolist()] + df_main.values.tolist())
 
-    # === Detectar grupos repetidos ===
+    # === Grupos repetidos ===
     repeat_groups = {}
     for row in results:
         for key, value in row.items():
@@ -81,9 +98,10 @@ def upload_to_google_sheets(results):
                     item["_parent_id"] = row.get("_id")
                     repeat_groups[key].append(item)
 
-    # Subir cada grupo como hoja independiente
     for group_name, records in repeat_groups.items():
         df_group = pd.DataFrame(records)
+        df_group = clean_dataframe(df_group)
+
         sheet_name = sanitize_sheet_name(group_name)
         try:
             worksheet = sh.worksheet(sheet_name)
@@ -95,12 +113,18 @@ def upload_to_google_sheets(results):
 
     print(f"✅ Datos subidos correctamente a Google Sheets: {SHEET_ID}")
 
+
 def main():
+    # === Obtener resultados ===
     results = get_all_submissions(BASE_URL, headers=HEADERS)
+
     if not results:
         print("⚠ No se encontraron resultados en la respuesta JSON")
         return
+
+    # === Subir a Google Sheets ===
     upload_to_google_sheets(results)
+
 
 if __name__ == "__main__":
     main()
