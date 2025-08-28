@@ -26,9 +26,9 @@ jobs:
           KOBO_TOKEN: ${{ secrets.KOBO_TOKEN }}
         run: python KoboData_2RepInfCampo.py
 
-      - name: Upload Excel (overwrite)
+      - name: Upload output folder (overwrite)
         uses: actions/upload-artifact@v4
         with:
           name: ReporteInfCampo
-          path: output/2_ReporteInfCampo.xlsx
+          path: output/
           overwrite: true
