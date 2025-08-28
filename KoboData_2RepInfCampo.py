@@ -7,102 +7,176 @@ Original file is located at
     https://colab.research.google.com/drive/1g6fYkkyupbeH1hgmXrSzUvRNv-GTVKez
 """
 
+#!/usr/bin/env python3
 import os
 import json
+import re
 import requests
 import pandas as pd
+import numpy as np
 from google.oauth2.service_account import Credentials
 import gspread
 
-# === CONFIGURACIÓN ===
+# ===== CONFIGURACIÓN =====
 KOBO_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions/?format=json"
 OUTPUT_FOLDER = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_FOLDER, "2_ReporteInfCampo.xlsx")
 CREDENTIALS_FILE = "credentials.json"
-SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"  # <-- Reemplázalo por tu ID real de Google Sheets
+SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"  # <-- reemplazar por tu ID real
 
+# ===== UTILIDADES =====
+def sanitize_sheet_name(name: str, maxlen: int = 31) -> str:
+    """Limpia nombres para hojas (quita caracteres inválidos y trunca)."""
+    if not isinstance(name, str) or not name:
+        name = "sheet"
+    cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
+    cleaned = re.sub(r'\s+', '_', cleaned)[:maxlen]
+    return cleaned
 
-# === FUNCIONES ===
-def download_kobo_data(url):
-    print(f"📥 Descargando: {url}")
-    response = requests.get(url)
-    response.raise_for_status()
-    data = response.json()
-    return data.get("results", [])
+def safe_serialize(value):
+    """Convierte listas/dicts a JSON string; deja demás tipos tal cual (limpia NaN/inf)."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (list, dict)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    # numpy types
+    if isinstance(value, (np.generic,)):
+        return np.asscalar(value) if hasattr(np, "asscalar") else str(value)
+    return value
 
+# ===== DESCARGA (paginada/respuesta lista) =====
+def get_all_submissions(url, headers=None):
+    """Descarga todos los resultados de Kobo manejando paginación o lista directa."""
+    all_results = []
+    next_url = url
+    session = requests.Session()
+    while next_url:
+        print(f"📥 Descargando: {next_url}")
+        resp = session.get(next_url, headers=headers or {})
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            results = data.get("results", [])
+            all_results.extend(results)
+            next_url = data.get("next")
+        elif isinstance(data, list):
+            # respuesta es una lista completa
+            all_results.extend(data)
+            next_url = None
+        else:
+            print("⚠ Respuesta inesperada de la API - tipo desconocido")
+            next_url = None
+    return all_results
 
-def split_nested_data(df, parent_name="Main"):
+# ===== SEPARAR CAMPOS ANIDADOS =====
+def split_nested_data(df: pd.DataFrame, parent_name="Main"):
     """
-    Detecta columnas con listas o diccionarios y genera sub-hojas.
-    Retorna el df plano y un dict de sub_dfs {nombre: DataFrame}.
+    Detecta columnas con listas/dict y genera sub-dataframes.
+    Retorna df plano (con columnas anidadas serializadas) y dict de sub_dfs.
     """
     sub_dfs = {}
-    for col in df.columns:
-        if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
+    # iterar columnas y buscar celdas que sean list/dict
+    for col in list(df.columns):
+        mask = df[col].apply(lambda x: isinstance(x, (list, dict)))
+        if mask.any():
             rows = []
             for idx, val in df[col].items():
+                # identificar parent id (usar _id si existe en fila)
+                row_series = df.loc[idx]
+                parent_id = row_series.get("_id", idx)
                 if isinstance(val, list):
-                    for i, v in enumerate(val):
-                        rows.append({"parent_index": idx, "item_index": i, **({"value": v} if not isinstance(v, dict) else v)})
+                    for i, item in enumerate(val):
+                        if isinstance(item, dict):
+                            row = {"parent_id": parent_id, "item_index": i}
+                            # fusionar campos del dict (planos)
+                            for k, v in item.items():
+                                row[k] = v
+                        else:
+                            row = {"parent_id": parent_id, "item_index": i, "value": item}
+                        rows.append(row)
                 elif isinstance(val, dict):
-                    flat = {"parent_index": idx}
-                    flat.update(val)
-                    rows.append(flat)
+                    row = {"parent_id": parent_id}
+                    for k, v in val.items():
+                        row[k] = v
+                    rows.append(row)
             if rows:
-                sub_dfs[f"{parent_name}_{col}"] = pd.DataFrame(rows)
-            # Dejar como string en el main
-            df[col] = df[col].astype(str)
+                sub_name = f"{parent_name}_{col}"
+                sub_df = pd.DataFrame(rows)
+                # limpiar y serializar cualquier estructura restante
+                sub_df = sub_df.replace([np.inf, -np.inf], np.nan).fillna("")
+                sub_df = sub_df.applymap(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
+                sub_dfs[sub_name] = sub_df
+            # en el df principal dejamos la columna como texto serializado (para referencia)
+            df[col] = df[col].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else ("" if pd.isna(x) else x))
     return df, sub_dfs
 
-
-def save_to_excel(dfs, filename):
+# ===== GUARDAR A EXCEL =====
+def save_to_excel(dfs: dict, filename: str):
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with pd.ExcelWriter(filename, engine="openpyxl") as writer:
         for name, df in dfs.items():
-            df.to_excel(writer, sheet_name=name[:31], index=False)
-    print(f"✅ Archivo Excel generado con {dfs['Main'].shape[0]} registros en:\n{filename}")
+            sheet_name = sanitize_sheet_name(name, maxlen=31)
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    print(f"✅ Archivo Excel generado con {dfs.get('Main').shape[0] if 'Main' in dfs else 0} registros en:\n{filename}")
 
-
-def upload_to_google_sheets(dfs, sheet_id, creds_file):
-    scope = ["https://spreadsheets.google.com/feeds",
-             "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(creds_file, scopes=scope)
+# ===== SUBIR A GOOGLE SHEETS =====
+def upload_to_google_sheets(dfs: dict, sheet_id: str, creds_file: str):
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(creds_file, scopes=scopes)
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(sheet_id)
+    spreadsheet = client.open_by_key(sheet_id)
 
     for name, df in dfs.items():
-        sheet_name = name[:100]  # Sheets permite hasta 100 caracteres en el nombre
+        # preparar df limpio para Sheets (no listas/dicts, no NaN/inf)
+        df_clean = df.replace([np.inf, -np.inf], np.nan).fillna("")
+        df_clean = df_clean.applymap(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
+        # nombre hoja para Google (hasta 100 caracteres)
+        sheet_name = sanitize_sheet_name(name, maxlen=100)
         try:
-            worksheet = sheet.worksheet(sheet_name)
-            sheet.del_worksheet(worksheet)
-        except:
+            worksheet = spreadsheet.worksheet(sheet_name)
+            spreadsheet.del_worksheet(worksheet)
+        except gspread.exceptions.WorksheetNotFound:
             pass
-        worksheet = sheet.add_worksheet(title=sheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
-        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        # crear nueva hoja con tamaño adecuado
+        rows = max(1, df_clean.shape[0] + 1)
+        cols = max(1, df_clean.shape[1])
+        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
+        # actualizar en bloque (cabecera + datos)
+        payload = [df_clean.columns.values.tolist()] + df_clean.values.tolist()
+        worksheet.update(payload)
         print(f"📤 Hoja '{sheet_name}' actualizada en Google Sheets")
 
-
+# ===== FLUJO PRINCIPAL =====
 def main():
-    # 1. Descargar datos de Kobo
-    data = download_kobo_data(KOBO_URL)
-    if not data:
-        print("⚠️ No se encontraron registros en Kobo.")
+    # 1) descargar todos los registros de Kobo (maneja paginación)
+    results = get_all_submissions(KOBO_URL)
+    if not results:
+        print("⚠ No se encontraron registros en Kobo.")
         return
 
-    # 2. Crear DataFrame principal
-    df_main = pd.DataFrame(data)
+    # 2) DataFrame principal
+    df_main = pd.DataFrame(results)
 
-    # 3. Separar columnas anidadas en sub-hojas
-    df_main, sub_dfs = split_nested_data(df_main, "Main")
+    # 3) agregar columna submission_id si existe _id — ayuda a relaciones
+    if "_id" in df_main.columns:
+        df_main["submission_id"] = df_main["_id"]
+    else:
+        df_main["submission_id"] = df_main.index.astype(str)
+
+    # 4) detectar y separar anidados
+    df_main, sub_dfs = split_nested_data(df_main, parent_name="Main")
+    # organizar dict de hojas: Main + subhojas
     dfs = {"Main": df_main}
     dfs.update(sub_dfs)
 
-    # 4. Guardar en Excel
+    # 5) guardar archivo Excel
     save_to_excel(dfs, OUTPUT_FILE)
 
-    # 5. Subir a Google Sheets
+    # 6) subir a Google Sheets (reemplaza pestañas existentes)
     upload_to_google_sheets(dfs, SHEET_ID, CREDENTIALS_FILE)
-
 
 if __name__ == "__main__":
     main()
