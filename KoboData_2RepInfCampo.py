@@ -12,27 +12,27 @@ import pandas as pd
 import os
 import re
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from google.oauth2.service_account import Credentials
 
 # === Configuración ===
 BASE_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions/?format=json"
-
-# Si tu formulario es privado, usa tu Token:
-# HEADERS = {"Authorization": "Token TU_TOKEN_AQUI"}
 HEADERS = {}
 
-SHEET_NAME = "KoboData-2_RepInfCampo"   # Nombre de la hoja en Google Drive
+OUTPUT_DIR = "output"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "2_ReporteInfCampo.xlsx")
+
+SPREADSHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"   # 👉 reemplazar por el ID real de tu Google Sheet
+SHEET_NAME = "Datos_principales"
 
 
 def sanitize_sheet_name(name: str) -> str:
-    """Limpia el nombre de hoja para que sea válido en Excel/Sheets."""
+    """Limpia el nombre de hoja para que sea válido en Excel."""
     cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
     return cleaned[:31]
 
 
 def get_all_submissions(url, headers=None):
-    """Descarga todos los registros de KoboToolbox (paginados)."""
+    """Descarga datos desde Kobo (maneja lista o dict con results)."""
     all_results = []
     next_url = url
 
@@ -56,75 +56,83 @@ def get_all_submissions(url, headers=None):
     return all_results
 
 
-def flatten_values(value):
-    """Convierte listas o diccionarios a cadenas legibles."""
-    if isinstance(value, list):
-        return ", ".join([str(v) for v in value])
-    elif isinstance(value, dict):
-        return "; ".join([f"{k}:{v}" for k, v in value.items()])
-    return value
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte valores NaN, inf y -inf en cadenas seguras para Google Sheets."""
+    df = df.copy()
+    df = df.replace([float("inf"), float("-inf")], None)
+    df = df.fillna("")
+    return df
 
 
-def upload_to_google_sheets(df, sheet_name=SHEET_NAME):
-    """Sube el DataFrame a Google Sheets, agregando nuevas columnas en cada ejecución."""
-    # Autenticación
-    scope = ["https://spreadsheets.google.com/feeds",
+def add_audit_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrega columnas de auditoría personalizadas."""
+    df = df.copy()
+    df["audit_fecha_procesado"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    df["audit_num_registros"] = len(df)
+    return df
+
+
+def upload_to_google_sheets(results):
+    """Sube los datos a Google Sheets reemplazando todo el contenido."""
+    scope = ["https://www.googleapis.com/auth/spreadsheets",
              "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+
+    creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
     client = gspread.authorize(creds)
 
-    spreadsheet = client.open(sheet_name)
-    worksheet = spreadsheet.sheet1
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
-    # Limpieza de valores
-    df_clean = df.applymap(flatten_values)
+    # === Datos principales aplanados ===
+    df_main = pd.json_normalize(results, sep=".")
+    df_main = clean_dataframe(df_main)
+    df_main = add_audit_columns(df_main)
 
-    # Etiqueta de ejecución (fecha/hora)
-    run_tag = datetime.now().strftime("%Y%m%d_%H%M")
+    # === Subir a la hoja principal ===
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=SHEET_NAME, rows="100", cols="20")
 
-    # Descargar datos ya existentes
-    existing_data = worksheet.get_all_values()
-
-    if not existing_data:
-        # Si está vacío, subimos todo normal
-        headers = [f"{col}_{run_tag}" for col in df_clean.columns]
-        worksheet.update([headers] + df_clean.values.tolist())
-    else:
-        # Ya existe información → agregar nuevas columnas
-        existing_cols = len(existing_data[0])
-        new_headers = [f"{col}_{run_tag}" for col in df_clean.columns]
-
-        # Insertar todas las nuevas columnas de una sola vez
-        worksheet.add_cols(len(new_headers))
-
-        # Actualizar encabezados
-        worksheet.update_cell(1, existing_cols + 1, new_headers[0])
-        if len(new_headers) > 1:
-            worksheet.update(
-                f"R1C{existing_cols+1}:R1C{existing_cols+len(new_headers)}",
-                [new_headers]
-            )
-
-        # Insertar valores en bloque
-        values_range = f"R2C{existing_cols+1}:R{len(df_clean)+1}C{existing_cols+len(new_headers)}"
-        worksheet.update(values_range, df_clean.values.tolist())
+    worksheet.clear()
+    worksheet.update([df_main.columns.values.tolist()] + df_main.values.tolist())
+    print(f"✅ Datos actualizados en Google Sheets ({SHEET_NAME})")
 
 
 def main():
-    # === Descargar resultados de Kobo ===
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     results = get_all_submissions(BASE_URL, headers=HEADERS)
 
     if not results:
         print("⚠ No se encontraron resultados en la respuesta JSON")
         return
 
-    # Aplanar JSON principal
+    # === Exportar a Excel ===
     df_main = pd.json_normalize(results, sep=".")
+    df_main = clean_dataframe(df_main)
+    df_main = add_audit_columns(df_main)
 
-    # Subir a Google Sheets
-    upload_to_google_sheets(df_main)
+    repeat_groups = {}
+    for row in results:
+        for key, value in row.items():
+            if isinstance(value, list) and all(isinstance(x, dict) for x in value):
+                if key not in repeat_groups:
+                    repeat_groups[key] = []
+                for item in value:
+                    item["_parent_id"] = row.get("_id")
+                    repeat_groups[key].append(item)
 
-    print(f"✅ Datos subidos a Google Sheets ({SHEET_NAME}) agregando nuevas columnas.")
+    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+        df_main.to_excel(writer, sheet_name="Datos_principales", index=False)
+        for group_name, records in repeat_groups.items():
+            df_group = pd.DataFrame(records)
+            sheet_name = sanitize_sheet_name(group_name)
+            df_group.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    print(f"✅ Archivo Excel generado con {len(df_main)} registros en:\n{OUTPUT_FILE}")
+
+    # === Subir a Google Sheets ===
+    upload_to_google_sheets(results)
 
 
 if __name__ == "__main__":
