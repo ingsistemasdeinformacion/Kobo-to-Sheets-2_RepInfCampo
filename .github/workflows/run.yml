@@ -1,9 +1,9 @@
-name: Run Kobo Report Twice Daily
+name: Run Kobo Report Twice Daily to Google Sheets
 
 on:
   schedule:
     - cron: "0 9,21 * * *"   # 4 AM y 4 PM hora Colombia (09:00 y 21:00 UTC)
-  workflow_dispatch:          # Permite ejecutarlo manualmente también
+  workflow_dispatch:
 
 jobs:
   run-script:
@@ -21,14 +21,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run script
+      - name: Run script and upload to Google Sheets
         env:
           KOBO_TOKEN: ${{ secrets.KOBO_TOKEN }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: python KoboData_2RepInfCampo.py
-
-      - name: Upload output folder (overwrite)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ReporteInfCampo
-          path: output/
-          overwrite: true
