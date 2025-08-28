@@ -11,30 +11,24 @@ import requests
 import pandas as pd
 import os
 import re
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 
 # === Configuración ===
 BASE_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions/?format=json"
+HEADERS = {}  # {"Authorization": "Token TU_TOKEN_AQUI"}
 
-# Si es privado, usar token desde variable de entorno (GitHub Secret)
-HEADERS = {}
-# if "KOBO_TOKEN" in os.environ:
-    # HEADERS = {"Authorization": f"Token {os.environ['KOBO_TOKEN']}"}
-
-OUTPUT_DIR = "output"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "2_ReporteInfCampo.xlsx")
-
+# ID de tu Google Sheet
+SHEET_ID = "TU_GOOGLE_SHEET_ID"
 
 def sanitize_sheet_name(name: str) -> str:
-    """Limpia el nombre de hoja para que sea válido en Excel."""
     cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
     return cleaned[:31]
 
-
 def get_all_submissions(url, headers=None):
-    """Descarga datos desde Kobo (maneja lista o dict con results)."""
     all_results = []
     next_url = url
-
     while next_url:
         print(f"📥 Descargando: {next_url}")
         resp = requests.get(next_url, headers=headers)
@@ -51,21 +45,32 @@ def get_all_submissions(url, headers=None):
         else:
             print("⚠ Respuesta inesperada de la API")
             next_url = None
-
     return all_results
 
+def upload_to_google_sheets(results):
+    # Autenticación con Google
+    creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"]
+    )
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SHEET_ID)
 
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    results = get_all_submissions(BASE_URL, headers=HEADERS)
-
-    if not results:
-        print("⚠ No se encontraron resultados en la respuesta JSON")
-        return
-
+    # === Datos principales aplanados ===
     df_main = pd.json_normalize(results, sep=".")
 
+    # Sobrescribir hoja principal
+    try:
+        worksheet = sh.worksheet("Datos_principales")
+        sh.del_worksheet(worksheet)
+    except:
+        pass
+    worksheet = sh.add_worksheet(title="Datos_principales", rows="1000", cols="20")
+    worksheet.update([df_main.columns.values.tolist()] + df_main.values.tolist())
+
+    # === Detectar grupos repetidos ===
     repeat_groups = {}
     for row in results:
         for key, value in row.items():
@@ -76,17 +81,26 @@ def main():
                     item["_parent_id"] = row.get("_id")
                     repeat_groups[key].append(item)
 
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        df_main.to_excel(writer, sheet_name="Datos_principales", index=False)
-        for group_name, records in repeat_groups.items():
-            df_group = pd.DataFrame(records)
-            sheet_name = sanitize_sheet_name(group_name)
-            df_group.to_excel(writer, sheet_name=sheet_name, index=False)
+    # Subir cada grupo como hoja independiente
+    for group_name, records in repeat_groups.items():
+        df_group = pd.DataFrame(records)
+        sheet_name = sanitize_sheet_name(group_name)
+        try:
+            worksheet = sh.worksheet(sheet_name)
+            sh.del_worksheet(worksheet)
+        except:
+            pass
+        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="20")
+        worksheet.update([df_group.columns.values.tolist()] + df_group.values.tolist())
 
-    print(f"✅ Archivo Excel generado con {len(df_main)} registros en:\n{OUTPUT_FILE}")
-    print(f"📊 Hojas exportadas: Datos_principales + {[sanitize_sheet_name(k) for k in repeat_groups.keys()]}")
+    print(f"✅ Datos subidos correctamente a Google Sheets: {SHEET_ID}")
 
+def main():
+    results = get_all_submissions(BASE_URL, headers=HEADERS)
+    if not results:
+        print("⚠ No se encontraron resultados en la respuesta JSON")
+        return
+    upload_to_google_sheets(results)
 
 if __name__ == "__main__":
     main()
-
