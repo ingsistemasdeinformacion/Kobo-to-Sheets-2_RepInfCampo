@@ -24,7 +24,7 @@ jobs:
       - name: Run script
         env:
           KOBO_TOKEN: ${{ secrets.KOBO_TOKEN }}
-        run: python script.py
+        run: python KoboData_2RepInfCampo.py
 
       - name: Upload Excel (overwrite)
         uses: actions/upload-artifact@v4
