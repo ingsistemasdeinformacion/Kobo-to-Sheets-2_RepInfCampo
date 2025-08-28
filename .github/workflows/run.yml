@@ -4,9 +4,7 @@ on:
   schedule:
     # Ejecutar a las 4:00 y 16:00 hora Colombia (UTC-5)
     - cron: "0 9,21 * * *"
-
-  workflow_dispatch:  # Permite ejecutarlo manualmente
-  
+  workflow_dispatch: # Permite ejecución manual
 
 jobs:
   build:
@@ -26,9 +24,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install pandas requests gspread google-auth openpyxl
 
-    - name: Add Google credentials
+    - name: Crear credentials.json
       run: |
-        echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
+        echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
     - name: Run script
       run: python KoboData_2RepInfCampo.py
