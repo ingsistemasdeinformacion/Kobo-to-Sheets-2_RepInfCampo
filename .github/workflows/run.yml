@@ -1,9 +1,9 @@
-name: Run Kobo Report Daily
+name: Run Kobo Report Twice Daily
 
 on:
   schedule:
-    - cron: "0 17 * * *"   # Ejecuta todos los días a las 17:00 UTC (12:00 M Colombia)
-  workflow_dispatch:        # Permite ejecutarlo manualmente también
+    - cron: "0 9,21 * * *"   # 4 AM y 4 PM hora Colombia (09:00 y 21:00 UTC)
+  workflow_dispatch:          # Permite ejecutarlo manualmente también
 
 jobs:
   run-script:
@@ -23,11 +23,12 @@ jobs:
 
       - name: Run script
         env:
-          KOBO_TOKEN: ${{ secrets.KOBO_TOKEN }}   # Solo se usa si la API es privada
+          KOBO_TOKEN: ${{ secrets.KOBO_TOKEN }}
         run: python script.py
 
-      - name: Upload Excel
-        uses: actions/upload-artifact@v3
+      - name: Upload Excel (overwrite)
+        uses: actions/upload-artifact@v4
         with:
           name: ReporteInfCampo
           path: output/2_ReporteInfCampo.xlsx
+          overwrite: true
