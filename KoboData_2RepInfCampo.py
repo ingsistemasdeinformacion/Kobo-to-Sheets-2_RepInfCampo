@@ -7,132 +7,101 @@ Original file is located at
     https://colab.research.google.com/drive/1g6fYkkyupbeH1hgmXrSzUvRNv-GTVKez
 """
 
+import os
+import json
 import requests
 import pandas as pd
-import os
-import re
-import gspread
 from google.oauth2.service_account import Credentials
+import gspread
 
-# === Configuración ===
-BASE_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions/?format=json"
-HEADERS = {}
-
-OUTPUT_DIR = "output"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "2_ReporteInfCampo.xlsx")
-
-SPREADSHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"   # 👉 reemplazar por el ID real de tu Google Sheet
-SHEET_NAME = "Datos_principales"
+# === CONFIGURACIÓN ===
+KOBO_URL = "https://kf.kobotoolbox.org/assets/axWwJY5A9AeyzcJPtjACaf/submissions/?format=json"
+OUTPUT_FOLDER = "output"
+OUTPUT_FILE = os.path.join(OUTPUT_FOLDER, "2_ReporteInfCampo.xlsx")
+CREDENTIALS_FILE = "credentials.json"
+SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"  # <-- Reemplázalo por tu ID real de Google Sheets
 
 
-def sanitize_sheet_name(name: str) -> str:
-    """Limpia el nombre de hoja para que sea válido en Excel."""
-    cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
-    return cleaned[:31]
+# === FUNCIONES ===
+def download_kobo_data(url):
+    print(f"📥 Descargando: {url}")
+    response = requests.get(url)
+    response.raise_for_status()
+    data = response.json()
+    return data.get("results", [])
 
 
-def get_all_submissions(url, headers=None):
-    """Descarga datos desde Kobo (maneja lista o dict con results)."""
-    all_results = []
-    next_url = url
-
-    while next_url:
-        print(f"📥 Descargando: {next_url}")
-        resp = requests.get(next_url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if isinstance(data, dict):
-            results = data.get("results", [])
-            all_results.extend(results)
-            next_url = data.get("next")
-        elif isinstance(data, list):
-            all_results.extend(data)
-            next_url = None
-        else:
-            print("⚠ Respuesta inesperada de la API")
-            next_url = None
-
-    return all_results
-
-
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Convierte valores NaN, inf y -inf en cadenas seguras para Google Sheets."""
-    df = df.copy()
-    df = df.replace([float("inf"), float("-inf")], None)
-    df = df.fillna("")
-    return df
+def split_nested_data(df, parent_name="Main"):
+    """
+    Detecta columnas con listas o diccionarios y genera sub-hojas.
+    Retorna el df plano y un dict de sub_dfs {nombre: DataFrame}.
+    """
+    sub_dfs = {}
+    for col in df.columns:
+        if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
+            rows = []
+            for idx, val in df[col].items():
+                if isinstance(val, list):
+                    for i, v in enumerate(val):
+                        rows.append({"parent_index": idx, "item_index": i, **({"value": v} if not isinstance(v, dict) else v)})
+                elif isinstance(val, dict):
+                    flat = {"parent_index": idx}
+                    flat.update(val)
+                    rows.append(flat)
+            if rows:
+                sub_dfs[f"{parent_name}_{col}"] = pd.DataFrame(rows)
+            # Dejar como string en el main
+            df[col] = df[col].astype(str)
+    return df, sub_dfs
 
 
-def add_audit_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Agrega columnas de auditoría personalizadas."""
-    df = df.copy()
-    df["audit_fecha_procesado"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-    df["audit_num_registros"] = len(df)
-    return df
+def save_to_excel(dfs, filename):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with pd.ExcelWriter(filename, engine="openpyxl") as writer:
+        for name, df in dfs.items():
+            df.to_excel(writer, sheet_name=name[:31], index=False)
+    print(f"✅ Archivo Excel generado con {dfs['Main'].shape[0]} registros en:\n{filename}")
 
 
-def upload_to_google_sheets(results):
-    """Sube los datos a Google Sheets reemplazando todo el contenido."""
-    scope = ["https://www.googleapis.com/auth/spreadsheets",
+def upload_to_google_sheets(dfs, sheet_id, creds_file):
+    scope = ["https://spreadsheets.google.com/feeds",
              "https://www.googleapis.com/auth/drive"]
-
-    creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
+    creds = Credentials.from_service_account_file(creds_file, scopes=scope)
     client = gspread.authorize(creds)
+    sheet = client.open_by_key(sheet_id)
 
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-
-    # === Datos principales aplanados ===
-    df_main = pd.json_normalize(results, sep=".")
-    df_main = clean_dataframe(df_main)
-    df_main = add_audit_columns(df_main)
-
-    # === Subir a la hoja principal ===
-    try:
-        worksheet = spreadsheet.worksheet(SHEET_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=SHEET_NAME, rows="100", cols="20")
-
-    worksheet.clear()
-    worksheet.update([df_main.columns.values.tolist()] + df_main.values.tolist())
-    print(f"✅ Datos actualizados en Google Sheets ({SHEET_NAME})")
+    for name, df in dfs.items():
+        sheet_name = name[:100]  # Sheets permite hasta 100 caracteres en el nombre
+        try:
+            worksheet = sheet.worksheet(sheet_name)
+            sheet.del_worksheet(worksheet)
+        except:
+            pass
+        worksheet = sheet.add_worksheet(title=sheet_name, rows=df.shape[0] + 1, cols=df.shape[1])
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        print(f"📤 Hoja '{sheet_name}' actualizada en Google Sheets")
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    results = get_all_submissions(BASE_URL, headers=HEADERS)
-
-    if not results:
-        print("⚠ No se encontraron resultados en la respuesta JSON")
+    # 1. Descargar datos de Kobo
+    data = download_kobo_data(KOBO_URL)
+    if not data:
+        print("⚠️ No se encontraron registros en Kobo.")
         return
 
-    # === Exportar a Excel ===
-    df_main = pd.json_normalize(results, sep=".")
-    df_main = clean_dataframe(df_main)
-    df_main = add_audit_columns(df_main)
+    # 2. Crear DataFrame principal
+    df_main = pd.DataFrame(data)
 
-    repeat_groups = {}
-    for row in results:
-        for key, value in row.items():
-            if isinstance(value, list) and all(isinstance(x, dict) for x in value):
-                if key not in repeat_groups:
-                    repeat_groups[key] = []
-                for item in value:
-                    item["_parent_id"] = row.get("_id")
-                    repeat_groups[key].append(item)
+    # 3. Separar columnas anidadas en sub-hojas
+    df_main, sub_dfs = split_nested_data(df_main, "Main")
+    dfs = {"Main": df_main}
+    dfs.update(sub_dfs)
 
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        df_main.to_excel(writer, sheet_name="Datos_principales", index=False)
-        for group_name, records in repeat_groups.items():
-            df_group = pd.DataFrame(records)
-            sheet_name = sanitize_sheet_name(group_name)
-            df_group.to_excel(writer, sheet_name=sheet_name, index=False)
+    # 4. Guardar en Excel
+    save_to_excel(dfs, OUTPUT_FILE)
 
-    print(f"✅ Archivo Excel generado con {len(df_main)} registros en:\n{OUTPUT_FILE}")
-
-    # === Subir a Google Sheets ===
-    upload_to_google_sheets(results)
+    # 5. Subir a Google Sheets
+    upload_to_google_sheets(dfs, SHEET_ID, CREDENTIALS_FILE)
 
 
 if __name__ == "__main__":
