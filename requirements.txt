@@ -1,3 +1,4 @@
-﻿requests
+requests
 pandas
-openpyxl
+gspread
+google-auth
