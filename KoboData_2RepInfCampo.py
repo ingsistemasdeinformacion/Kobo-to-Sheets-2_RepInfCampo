@@ -74,7 +74,7 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
     en columnas que contengan TiqueteCajon, TiqueteCable u OperariosCosecha.
     """
     sub_dfs = {}
-    employee_patterns = ["TiqueteCajon", "TiqueteCable", "OperariosCosecha"]
+    employee_keywords = ["TiqueteCajon", "TiqueteCable", "OperariosCosecha"]
 
     for col in list(df.columns):
         mask = df[col].apply(lambda x: isinstance(x, (list, dict, str)))
@@ -84,6 +84,7 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                 row_series = df.loc[idx]
                 parent_id = row_series.get("_id", idx)
 
+                # Caso 1: lista
                 if isinstance(val, list):
                     for i, item in enumerate(val):
                         if isinstance(item, dict):
@@ -94,14 +95,15 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                             row = {"parent_id": parent_id, "item_index": i, "value": item}
                         rows.append(row)
 
+                # Caso 2: diccionario
                 elif isinstance(val, dict):
                     row = {"parent_id": parent_id}
                     for k, v in val.items():
                         row[k] = v
                     rows.append(row)
 
-                elif isinstance(val, str) and any(p in col for p in employee_patterns):
-                    # Expandir empleados separados por espacios
+                # Caso 3: campo string con empleados
+                elif isinstance(val, str) and any(key in col for key in employee_keywords):
                     empleados = [emp.strip() for emp in val.split(" ") if emp.strip()]
                     for emp in empleados:
                         row = {"parent_id": parent_id}
@@ -116,12 +118,9 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                 sub_name = f"{parent_name}_{col}"
                 sub_df = pd.DataFrame(rows)
                 sub_df = sub_df.replace([np.inf, -np.inf], np.nan).fillna("")
-                sub_df = sub_df.applymap(
-                    lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
-                )
                 sub_dfs[sub_name] = sub_df
 
-            # Serializar valores no procesados (para referencia en df principal)
+            # Serializar para mantener consistencia en el df principal
             df[col] = df[col].apply(
                 lambda x: json.dumps(x, ensure_ascii=False)
                 if isinstance(x, (list, dict)) else ("" if pd.isna(x) else x)
@@ -167,6 +166,7 @@ def upload_to_google_sheets(dfs: dict, sheet_id: str, creds_file: str):
                     new_df = df_clean
             else:
                 if "parent_id" in df_clean.columns and "parent_id" in existing_df.columns:
+                    # Comparación por parent_id + item_index (si existe)
                     if "item_index" in df_clean.columns and "item_index" in existing_df.columns:
                         merged = existing_df[["parent_id", "item_index"]].astype(str).agg("_".join, axis=1)
                         current = df_clean[["parent_id", "item_index"]].astype(str).agg("_".join, axis=1)
