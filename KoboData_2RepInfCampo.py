@@ -21,11 +21,9 @@ OUTPUT_FILE = os.path.join(OUTPUT_FOLDER, "2_ReporteInfCampo.xlsx")
 CREDENTIALS_FILE = "credentials.json"
 SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"  # <-- reemplazar por tu ID real
 
-# Columnas clave para expansión de empleados
-EMPLOYEE_KEYWORDS = ["TiqueteCajon", "TiqueteCable", "OperariosCosecha"]
-
 # ===== UTILIDADES =====
 def sanitize_sheet_name(name: str, maxlen: int = 31) -> str:
+    """Limpia nombres para hojas (quita caracteres inválidos y trunca)."""
     if not isinstance(name, str) or not name:
         name = "sheet"
     cleaned = re.sub(r'[\/\\\?\*\[\]\:]', '_', name)
@@ -33,6 +31,7 @@ def sanitize_sheet_name(name: str, maxlen: int = 31) -> str:
     return cleaned
 
 def safe_serialize(value):
+    """Convierte listas/dicts a JSON string; deja demás tipos tal cual (limpia NaN/inf)."""
     if pd.isna(value):
         return ""
     if isinstance(value, (list, dict)):
@@ -46,6 +45,7 @@ def safe_serialize(value):
 
 # ===== DESCARGA (paginada/respuesta lista) =====
 def get_all_submissions(url, headers=None):
+    """Descarga todos los resultados de Kobo manejando paginación o lista directa."""
     all_results = []
     next_url = url
     session = requests.Session()
@@ -68,7 +68,14 @@ def get_all_submissions(url, headers=None):
 
 # ===== SEPARAR CAMPOS ANIDADOS Y EXPANDIR EMPLEADOS =====
 def split_nested_data(df: pd.DataFrame, parent_name="Main"):
+    """
+    Detecta columnas con listas/dict y genera sub-dataframes.
+    Además, expande los campos de empleados separados por espacios
+    en columnas que contengan TiqueteCajon, TiqueteCable u OperariosCosecha.
+    """
     sub_dfs = {}
+    employee_patterns = ["TiqueteCajon", "TiqueteCable", "OperariosCosecha"]
+
     for col in list(df.columns):
         mask = df[col].apply(lambda x: isinstance(x, (list, dict, str)))
         if mask.any():
@@ -77,53 +84,26 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                 row_series = df.loc[idx]
                 parent_id = row_series.get("_id", idx)
 
-                # ¿Columna de empleados?
-                expand_employees = any(k in col for k in EMPLOYEE_KEYWORDS)
-
                 if isinstance(val, list):
                     for i, item in enumerate(val):
                         if isinstance(item, dict):
-                            if expand_employees:
-                                for key, emp_val in item.items():
-                                    if isinstance(emp_val, str) and " " in emp_val:
-                                        for emp in emp_val.split():
-                                            new_row = {"parent_id": parent_id, "item_index": i}
-                                            new_row.update({k: v for k, v in item.items() if k != key})
-                                            new_row[key] = emp
-                                            rows.append(new_row)
-                                    else:
-                                        new_row = {"parent_id": parent_id, "item_index": i}
-                                        new_row.update(item)
-                                        rows.append(new_row)
-                            else:
-                                row = {"parent_id": parent_id, "item_index": i}
-                                row.update(item)
-                                rows.append(row)
+                            row = {"parent_id": parent_id, "item_index": i}
+                            for k, v in item.items():
+                                row[k] = v
                         else:
                             row = {"parent_id": parent_id, "item_index": i, "value": item}
-                            rows.append(row)
-
-                elif isinstance(val, dict):
-                    if expand_employees:
-                        for key, emp_val in val.items():
-                            if isinstance(emp_val, str) and " " in emp_val:
-                                for emp in emp_val.split():
-                                    new_row = {"parent_id": parent_id}
-                                    new_row.update({k: v for k, v in val.items() if k != key})
-                                    new_row[key] = emp
-                                    rows.append(new_row)
-                            else:
-                                new_row = {"parent_id": parent_id}
-                                new_row.update(val)
-                                rows.append(new_row)
-                    else:
-                        row = {"parent_id": parent_id}
-                        row.update(val)
                         rows.append(row)
 
-                elif isinstance(val, str) and expand_employees:
-                    # Cadena con múltiples empleados separados por espacios
-                    for emp in val.split():
+                elif isinstance(val, dict):
+                    row = {"parent_id": parent_id}
+                    for k, v in val.items():
+                        row[k] = v
+                    rows.append(row)
+
+                elif isinstance(val, str) and any(p in col for p in employee_patterns):
+                    # Expandir empleados separados por espacios
+                    empleados = [emp.strip() for emp in val.split(" ") if emp.strip()]
+                    for emp in empleados:
                         row = {"parent_id": parent_id}
                         # Copiar todos los demás campos de la fila excepto esta columna
                         for k, v in row_series.items():
@@ -136,13 +116,17 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                 sub_name = f"{parent_name}_{col}"
                 sub_df = pd.DataFrame(rows)
                 sub_df = sub_df.replace([np.inf, -np.inf], np.nan).fillna("")
-                sub_df = sub_df.applymap(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
+                sub_df = sub_df.applymap(
+                    lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
+                )
                 sub_dfs[sub_name] = sub_df
 
-            # En el df principal dejamos serializado lo complejo
+            # Serializar valores no procesados (para referencia en df principal)
             df[col] = df[col].apply(
-                lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else ("" if pd.isna(x) else x)
+                lambda x: json.dumps(x, ensure_ascii=False)
+                if isinstance(x, (list, dict)) else ("" if pd.isna(x) else x)
             )
+
     return df, sub_dfs
 
 # ===== GUARDAR A EXCEL =====
@@ -154,7 +138,7 @@ def save_to_excel(dfs: dict, filename: str):
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     print(f"✅ Archivo Excel generado con {dfs.get('Main').shape[0] if 'Main' in dfs else 0} registros en:\n{filename}")
 
-# ===== SUBIR A GOOGLE SHEETS (INCREMENTAL) =====
+# ===== SUBIR A GOOGLE SHEETS (MODO INCREMENTAL) =====
 def upload_to_google_sheets(dfs: dict, sheet_id: str, creds_file: str):
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(creds_file, scopes=scopes)
@@ -163,7 +147,9 @@ def upload_to_google_sheets(dfs: dict, sheet_id: str, creds_file: str):
 
     for name, df in dfs.items():
         df_clean = df.replace([np.inf, -np.inf], np.nan).fillna("")
-        df_clean = df_clean.applymap(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
+        df_clean = df_clean.applymap(
+            lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
+        )
         sheet_name = sanitize_sheet_name(name, maxlen=100)
 
         try:
@@ -171,6 +157,7 @@ def upload_to_google_sheets(dfs: dict, sheet_id: str, creds_file: str):
             existing_data = worksheet.get_all_records()
             existing_df = pd.DataFrame(existing_data)
 
+            # === Validación de registros nuevos ===
             if name == "Main":
                 if "_id" in df_clean.columns and "_id" in existing_df.columns:
                     new_df = df_clean[~df_clean["_id"].astype(str).isin(existing_df["_id"].astype(str))]
@@ -189,9 +176,11 @@ def upload_to_google_sheets(dfs: dict, sheet_id: str, creds_file: str):
                 else:
                     new_df = df_clean
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=sheet_name,
-                                                  rows=max(1, df_clean.shape[0] + 1),
-                                                  cols=max(1, df_clean.shape[1]))
+            worksheet = spreadsheet.add_worksheet(
+                title=sheet_name,
+                rows=max(1, df_clean.shape[0] + 1),
+                cols=max(1, df_clean.shape[1])
+            )
             worksheet.update([df_clean.columns.values.tolist()])
             new_df = df_clean
 
@@ -209,6 +198,7 @@ def main():
         return
 
     df_main = pd.DataFrame(results)
+
     if "_id" in df_main.columns:
         df_main["submission_id"] = df_main["_id"]
     else:
