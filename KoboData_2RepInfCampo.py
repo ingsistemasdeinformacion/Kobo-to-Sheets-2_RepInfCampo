@@ -21,7 +21,7 @@ OUTPUT_FILE = os.path.join(OUTPUT_FOLDER, "2_ReporteInfCampo.xlsx")
 CREDENTIALS_FILE = "credentials.json"
 SHEET_ID = "1uhpIYhuFhfYJlHuJKq1VDsj9jFPXS4iW2qxdyPL4aiA"  # <-- reemplazar por tu ID real
 
-# Columnas que contienen empleados para expandir
+# Columnas clave para expansión de empleados
 EMPLOYEE_KEYWORDS = ["TiqueteCajon", "TiqueteCable", "OperariosCosecha"]
 
 # ===== UTILIDADES =====
@@ -77,16 +77,15 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                 row_series = df.loc[idx]
                 parent_id = row_series.get("_id", idx)
 
-                # Identificar si la columna contiene empleados por keyword
+                # ¿Columna de empleados?
                 expand_employees = any(k in col for k in EMPLOYEE_KEYWORDS)
 
                 if isinstance(val, list):
                     for i, item in enumerate(val):
                         if isinstance(item, dict):
                             if expand_employees:
-                                # Expandir cada empleado dentro del dict
                                 for key, emp_val in item.items():
-                                    if isinstance(emp_val, str) and ' ' in emp_val:
+                                    if isinstance(emp_val, str) and " " in emp_val:
                                         for emp in emp_val.split():
                                             new_row = {"parent_id": parent_id, "item_index": i}
                                             new_row.update({k: v for k, v in item.items() if k != key})
@@ -103,10 +102,11 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                         else:
                             row = {"parent_id": parent_id, "item_index": i, "value": item}
                             rows.append(row)
+
                 elif isinstance(val, dict):
                     if expand_employees:
                         for key, emp_val in val.items():
-                            if isinstance(emp_val, str) and ' ' in emp_val:
+                            if isinstance(emp_val, str) and " " in emp_val:
                                 for emp in emp_val.split():
                                     new_row = {"parent_id": parent_id}
                                     new_row.update({k: v for k, v in val.items() if k != key})
@@ -120,11 +120,18 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                         row = {"parent_id": parent_id}
                         row.update(val)
                         rows.append(row)
+
                 elif isinstance(val, str) and expand_employees:
-                    # Cadena de nombres separados por espacios
+                    # Cadena con múltiples empleados separados por espacios
                     for emp in val.split():
-                        row = {"parent_id": parent_id, "value": emp}
+                        row = {"parent_id": parent_id}
+                        # Copiar todos los demás campos de la fila excepto esta columna
+                        for k, v in row_series.items():
+                            if k != col:
+                                row[k] = v
+                        row[col] = emp
                         rows.append(row)
+
             if rows:
                 sub_name = f"{parent_name}_{col}"
                 sub_df = pd.DataFrame(rows)
@@ -132,7 +139,10 @@ def split_nested_data(df: pd.DataFrame, parent_name="Main"):
                 sub_df = sub_df.applymap(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
                 sub_dfs[sub_name] = sub_df
 
-            df[col] = df[col].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else ("" if pd.isna(x) else x))
+            # En el df principal dejamos serializado lo complejo
+            df[col] = df[col].apply(
+                lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else ("" if pd.isna(x) else x)
+            )
     return df, sub_dfs
 
 # ===== GUARDAR A EXCEL =====
